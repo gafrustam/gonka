@@ -227,12 +227,11 @@ func (k Keeper) PrecomputeSlotPublicKeysBlst(epochBLSData *types.EpochBLSData) (
 		// Perform MSM with blst
 		// 255 bits for BLS12-381 scalar field
 		aggregatedPubKeyP2 := blst.P2AffinesMult(totalCommitmentsAffine, scalars, 255)
-		slotAffine := aggregatedPubKeyP2.ToAffine()
-		if !slotAffine.KeyValidate() {
-			return nil, fmt.Errorf("aggregated slot public key for slot %d is invalid or identity", slotIndex)
-		}
 
-		pkBytes := slotAffine.Compress()
+		// An identity key only takes this slot out of signing: verifyBLSPartialSignatureBlst
+		// rejects it. Only the slot's owner can make it zero, so failing the DKG here would
+		// let any one participant fail every DKG.
+		pkBytes := aggregatedPubKeyP2.ToAffine().Compress()
 		slotPublicKeys[slotIndex] = pkBytes
 	}
 

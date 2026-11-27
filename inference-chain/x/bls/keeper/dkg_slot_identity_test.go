@@ -9,6 +9,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
+	blst "github.com/supranational/blst/bindings/go"
 
 	"github.com/productscience/inference/x/bls/types"
 )
@@ -333,26 +334,34 @@ func TestDKGSlotIdentity_HonestDealersComplete(t *testing.T) {
 	require.NoError(t, requestSignature(h.k, h.ctx, next, 1))
 }
 
-// At c4f37dc17: one host with one slot fails the whole DKG. The epoch then has
-// no usable key, and the next epoch's key cannot be validated either, because
-// that is checked against this epoch's slot keys. Bridge mint and withdrawal
-// request their signature from the current epoch, so both epochs are lost.
-func TestDKGSlotIdentity_SlotOwnerFailsDKGAndNextEpoch(t *testing.T) {
+// A slot owner that zeroes its own slot only disables that slot: the DKG
+// completes, the zeroed slot cannot sign, and the other 75 slots sign the next
+// epoch's key.
+func TestDKGSlotIdentity_ZeroedSlotOnlyDisablesItself(t *testing.T) {
 	h := setupSlotIdentityDKG(t, 470)
 	dealWithCancelledSlot(t, h)
 
 	data := h.finish()
-	require.Equal(t, types.DKGPhase_DKG_PHASE_FAILED, data.DkgPhase)
-	require.Contains(t, h.dkgFailureReason(), fmt.Sprintf("aggregated slot public key for slot %d is invalid or identity", slotIdentityTarget))
-	require.Empty(t, data.SlotPublicKeys)
-	require.ErrorContains(t, requestSignature(h.k, h.ctx, h.epochID, 1), "DKG is not signed, current phase: DKG_PHASE_FAILED")
+	require.Equal(t, types.DKGPhase_DKG_PHASE_COMPLETED, data.DkgPhase, h.dkgFailureReason())
+	require.Len(t, data.SlotPublicKeys, slotIdentityTotal)
+	for slot, key := range data.SlotPublicKeys {
+		pk := new(blst.P2Affine).Uncompress(key)
+		require.Equal(t, slot != slotIdentityTarget, pk != nil && pk.KeyValidate(), "slot %d", slot)
+	}
 
 	next := h.storeNextEpoch()
-	for v := 0; v < slotIdentityHosts; v++ {
-		require.ErrorContains(t, h.validateNext(v, next, h.slotsOf(v)), "invalid BLS signature verification failed")
-	}
+	// The zeroed slot's partial signature is rejected (its secret is zero, so the signature is the identity) ...
+	require.Error(t, h.validateNext(slotIdentityAttacker, next, []uint32{slotIdentityTarget}))
+	// ... and the attacker's other slots plus the honest hosts still reach t+1 = 51.
+	attackerSlots := h.slotsOf(slotIdentityAttacker)
+	require.NoError(t, h.validateNext(slotIdentityAttacker, next, attackerSlots[:len(attackerSlots)-1]))
+	require.NoError(t, h.validateNext(0, next, h.slotsOf(0)))
 	nextData, err := h.k.GetEpochBLSData(h.ctx, next)
 	require.NoError(t, err)
-	require.Equal(t, types.DKGPhase_DKG_PHASE_COMPLETED, nextData.DkgPhase)
-	require.ErrorContains(t, requestSignature(h.k, h.ctx, next, 2), "completed fallback is disabled")
+	require.Equal(t, types.DKGPhase_DKG_PHASE_COMPLETED, nextData.DkgPhase, "49 slots are below t+1")
+	require.NoError(t, h.validateNext(1, next, h.slotsOf(1)))
+	nextData, err = h.k.GetEpochBLSData(h.ctx, next)
+	require.NoError(t, err)
+	require.Equal(t, types.DKGPhase_DKG_PHASE_SIGNED, nextData.DkgPhase)
+	require.NoError(t, requestSignature(h.k, h.ctx, next, 3))
 }
